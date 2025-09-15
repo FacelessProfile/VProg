@@ -45,12 +45,16 @@ coordY: Float
         this.CoordY = newCorY
     }
 	*/
-	fun move(time: Float) {                //Random Walk Linear
-    	val distance: Float = Speed * time
+	fun move(time: Float) {		//Random Walk Linear
+        var cons = time
+        while (cons>0){
+    	val distance: Float = Speed * 1 //1 due to cycle
     	val dx: Float = ((Math.random() * 2 - 1) * distance).toFloat()
     	val dy: Float = ((Math.random() * 2 - 1) * distance).toFloat()
     	CoordX += dx
     	CoordY += dy
+        cons-=1
+        }
 	}
     
 }
@@ -58,11 +62,7 @@ coordY: Float
 fun main() {
     val human1 = Human("John Doe", 50, 5.0f,0.0f,0.0f)
     human1.getHuman()
-    var cons = 50
-    while (cons>0){
     human1.move(15f)
     human1.getHuman()
-    cons-=1
     }
     //human1.getHuman()
-}
