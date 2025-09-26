@@ -8,14 +8,14 @@ Shalamov Nikita X-432
 - [x] Inheritance was learned
 - [x] Interfaces Learned , main splitted into small pieces
 
-### Stages Description
+# Stages Description
 
 ## 1. Random Walk
 
 Algorithm is pretty simple
 
-Here is a class Human with an Move method that takes 1 arg: human object walking time
-Movement developed according to RandomWalk algorithm:
-X and Y cords changing formulas:
--- distance = speed * time 
--- dx/dy = (random(0.0 : 1.1) * 2 - 1) * distance)
+Here is a class Human with an Move method that takes 1 arg: human object walking time\
+Movement developed according to RandomWalk algorithm:\
+X and Y cords changing formulas:\
+* distance = speed * time 
+* dx/dy = (random(0.0 : 1.1) * 2 - 1) * distance)
