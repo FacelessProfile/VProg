@@ -24,45 +24,97 @@ class MainActivity : AppCompatActivity() {
 
     }
 
-    fun evaluateExpression(expr: String): Double {
-        val expression = expr.replace(" ", "").replace(',', '.')
-        val ops = setOf('+', '-', '*', '/')
-        var opIndex = -1
-        var opChar: Char? = null
+    val ops = setOf('+', '-', '*', '/')
 
-        for (i in 1 until expression.length) {
-            val c = expression[i]
-            if (c in ops) {
-                opIndex = i
-                opChar = c
-                break
-            }
+    fun findOperands(expr: String, index: Int): Pair<Int, Int> {
+        var leftPointer = index - 1
+        var rightPointer = index + 1
+
+        while (leftPointer >= 0 && expr[leftPointer] !in ops) {
+            leftPointer--
+        }
+        leftPointer++
+
+        while (rightPointer < expr.length && expr[rightPointer] !in ops) {
+            rightPointer++
         }
 
-        if (opIndex == -1) {
-            return expression.toDoubleOrNull()
-                ?: throw IllegalArgumentException("NAN: '$expression'")
-        }
-
-        val left = expression.substring(0, opIndex)
-        val right = expression.substring(opIndex + 1)
-
-        val a = left.toDoubleOrNull() ?: throw IllegalArgumentException("NAN: '$left'")
-        val b = right.toDoubleOrNull() ?: throw IllegalArgumentException("NAN: '$right'")
-
-        return when (opChar) {
-            '+' -> a + b
-            '-' -> a - b
-            '*' -> a * b
-            '/' -> {
-                if (b == 0.0) throw ArithmeticException("Zero division error")
-                a / b
-            }
-
-            else -> throw IllegalArgumentException("Unknown op")
-        }
+        return leftPointer to rightPointer
     }
 
+    fun evaluateExpression(expr: String): Double {
+        val expression = expr.replace(" ", "").replace(',', '.')
+        var result = evaluateMultiplicationAndDivision(expression)
+        result = evaluateAdditionAndSubtraction(result.toString())
+
+        return result.toDouble()
+    }
+
+    fun evaluateMultiplicationAndDivision(expr: String): String {
+        var expression = expr.replace(" ", "").replace(',', '.')
+        var i = 0
+
+        while (i < expression.length) {
+            val c = expression[i]
+            if (c == '*' || c == '/') {
+                val (leftStart, rightEnd) = findOperands(expression, i)
+                val leftStr = expression.substring(leftStart, i)
+                val rightStr = expression.substring(i + 1, rightEnd)
+
+                val a = leftStr.toDoubleOrNull() ?: throw IllegalArgumentException("NAN: '$leftStr'")
+                val b = rightStr.toDoubleOrNull() ?: throw IllegalArgumentException("NAN: '$rightStr'")
+
+                val result = when (c) {
+                    '*' -> a * b
+                    '/' -> {
+                        if (b == 0.0) throw ArithmeticException("Zero division error")
+                        a / b
+                    }
+                    else -> throw IllegalArgumentException("Unknown op")
+                }
+                val before = expression.substring(0, leftStart)
+                val after = expression.substring(rightEnd)
+                expression = before + result + after
+                i = 0
+            } else {
+                i++
+            }
+        }
+
+        return expression
+    }
+
+    fun evaluateAdditionAndSubtraction(expr: String): String {
+        var expression = expr
+        var i = 0
+
+        while (i < expression.length) {
+            val c = expression[i]
+            if ((c == '+' || c == '-') && i > 0) {
+                val (leftStart, rightEnd) = findOperands(expression, i)
+                val leftStr = expression.substring(leftStart, i)
+                val rightStr = expression.substring(i + 1, rightEnd)
+
+                val a = leftStr.toDoubleOrNull() ?: throw IllegalArgumentException("NAN: '$leftStr'")
+                val b = rightStr.toDoubleOrNull() ?: throw IllegalArgumentException("NAN: '$rightStr'")
+
+                val result = when (c) {
+                    '+' -> a + b
+                    '-' -> a - b
+                    else -> throw IllegalArgumentException("Unknown op")
+                }
+
+                val before = expression.substring(0, leftStart)
+                val after = expression.substring(rightEnd)
+                expression = before + result + after
+                i = 0
+            } else {
+                i++
+            }
+        }
+
+        return expression
+    }
     fun CalculateField(v: View) {
         val textField = v as TextView
         val expression = textField.text.toString()
@@ -89,7 +141,6 @@ class MainActivity : AppCompatActivity() {
             textField.text = "0"
         }
         else if (textField.text =="0" && button.text=="0"){
-
         }
         else if (button.text=="="){
             CalculateField(textField)
