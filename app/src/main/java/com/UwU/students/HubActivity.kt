@@ -19,13 +19,23 @@ class HubActivity : AppCompatActivity() {
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
-    }
-    override fun onResume(){
-        super.onResume()
+
         val calc = findViewById<Button>(R.id.CalcTransferBTN)
         calc.setOnClickListener({
             val randomIntent = Intent(this, CalcActivity::class.java)
             startActivity(randomIntent)
         });
+
+
+        val media = findViewById<Button>(R.id.MediaTransferBTN)
+        media.setOnClickListener({
+            val randomIntent = Intent(this, MediaActivity::class.java)
+            startActivity(randomIntent)
+        });
+
+
+    }
+    override fun onResume(){
+        super.onResume()
     }
 }
