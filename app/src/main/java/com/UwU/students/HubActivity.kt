@@ -40,6 +40,12 @@ class HubActivity : AppCompatActivity() {
             startActivity(randomIntent)
         });
 
+        val telephony = findViewById<Button>(R.id.TelTransferBTN)
+        telephony.setOnClickListener({
+            val randomIntent = Intent(this, CellActivity::class.java)
+            startActivity(randomIntent)
+        })
+
 
     }
     override fun onResume(){
