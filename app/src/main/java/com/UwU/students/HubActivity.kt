@@ -34,6 +34,13 @@ class HubActivity : AppCompatActivity() {
         });
 
 
+        val location = findViewById<Button>(R.id.LocationTransferBTN)
+        location.setOnClickListener({
+            val randomIntent = Intent(this, LocationActivity::class.java)
+            startActivity(randomIntent)
+        });
+
+
     }
     override fun onResume(){
         super.onResume()
