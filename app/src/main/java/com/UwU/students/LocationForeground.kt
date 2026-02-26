@@ -5,10 +5,12 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.location.Location
+import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.IBinder
+import android.provider.Settings
 import android.telephony.*
 import android.util.Log
 import androidx.core.app.ActivityCompat
@@ -37,27 +39,40 @@ class LocationForeground : Service() {
         ).apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) add(Manifest.permission.FOREGROUND_SERVICE_LOCATION)
         }.toTypedArray()
 
         fun checkAndRequestPermissions(activity: Activity, requestCode: Int) {
             val missing = REQUIRED_PERMISSIONS.filter {
                 ActivityCompat.checkSelfPermission(activity, it) != PackageManager.PERMISSION_GRANTED
             }
-            if (missing.isNotEmpty()) {
-                ActivityCompat.requestPermissions(activity, missing.toTypedArray(), requestCode)
+            if (missing.isNotEmpty()) ActivityCompat.requestPermissions(activity, missing.toTypedArray(), requestCode)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                intent.data = Uri.parse("package:${activity.packageName}")
+                activity.startActivity(intent)
             }
         }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val notification = createNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+        } else {
+            startForeground(1, notification)
+        }
+        return START_STICKY
+    }
+
     override fun onCreate() {
         super.onCreate()
-        zmqHandler = ZmqHandler("tcp://192.168.0.19:20077")
-        startForeground(1, createNotification())
+        zmqHandler = ZmqHandler("tcp://192.168.0.55:20077")
         scheduler.scheduleWithFixedDelay({
-            try { getCurrentLocation() } catch (e: Exception) { Log.e(LOG_TAG, "${e.message}") }
+            try { getCurrentLocation() } catch (e: Exception) { Log.e(LOG_TAG, "Ошибка: ${e.message}") }
         }, 0, UPDATE_INTERVAL, TimeUnit.MILLISECONDS)
     }
 
@@ -69,16 +84,16 @@ class LocationForeground : Service() {
         }
         return NotificationCompat.Builder(this, chanId)
             .setContentTitle("MY PROJECT")
-            .setContentText("Идёт сбор данных о локации")
+            .setContentText("Идет сбор данных (30с буфер)")
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
             .build()
     }
 
     private fun getCurrentLocation() {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return
-        val fusedClient = LocationServices.getFusedLocationProviderClient(this)
-        fusedClient.lastLocation.addOnSuccessListener { location ->
+        LocationServices.getFusedLocationProviderClient(this).lastLocation.addOnSuccessListener { location ->
             location?.let {
                 val data = "${it.latitude};${it.longitude};${getSignalStrength()};${System.currentTimeMillis() / 1000}"
                 processData(data)
@@ -88,38 +103,55 @@ class LocationForeground : Service() {
 
     private fun processData(newData: String) {
         synchronized(ramBuffer) { ramBuffer.add(newData) }
-        scope.launch {
-            val docDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-            if (!docDir.exists()) docDir.mkdirs()
-            val file = File(docDir, "location.txt")
 
+        // Ждем 6 записей (6 * 5с = 30 секунд)
+        if (ramBuffer.size < 6) return
+
+        scope.launch {
             val currentRam = synchronized(ramBuffer) {
                 val copy = ramBuffer.toList()
                 ramBuffer.clear()
                 copy
             }
 
-            val diskData = if (file.exists()) file.readLines() else emptyList()
-            val totalPayload = diskData + currentRam
-            if (totalPayload.isEmpty()) return@launch
+            val docDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+            if (!docDir.exists()) docDir.mkdirs()
+            val file = File(docDir, "location.txt")
 
-            var success = true
-            val sentCount = mutableListOf<String>()
+            // Читаем кеш БЕЗОПАСНО
+            val diskData = try {
+                if (file.exists()) file.readLines() else emptyList()
+            } catch (e: Exception) {
+                Log.e(LOG_TAG, "Ошибка доступа к файлу: ${e.message}")
+                emptyList()
+            }
+
+            val totalPayload = diskData + currentRam
+            if (file.exists()) file.delete()
+
+            Log.d(LOG_TAG, "30с прошло. Пытаюсь отправить ${totalPayload.size} строк...")
+
+            val unsent = mutableListOf<String>()
+            var isError = false
 
             for (line in totalPayload) {
-                if (zmqHandler.sendData(line) == "ACK") {
-                    sentCount.add(line)
+                if (!isError && zmqHandler.sendData(line) == "ACK") {
+                    Log.d(LOG_TAG, "Успешно отправлено: $line")
                 } else {
-                    success = false
-                    break
+                    isError = true
+                    unsent.add(line)
                 }
             }
 
-            if (success) {
-                if (file.exists()) file.delete()
+            if (unsent.isNotEmpty()) {
+                try {
+                    Log.w(LOG_TAG, "Кэширую ${unsent.size} строк в Documents/location.txt")
+                    file.appendText(unsent.joinToString("\n") + "\n")
+                } catch (e: Exception) {
+                    Log.e(LOG_TAG, "КРИТИЧЕСКАЯ ОШИБКА: Не удалось записать файл! Проверь разрешения в настройках.")
+                }
             } else {
-                val unsent = totalPayload.drop(sentCount.size)
-                file.writeText(unsent.joinToString("\n") + "\n")
+                Log.d(LOG_TAG, "Все данные успешно ушли")
             }
         }
     }
@@ -148,41 +180,29 @@ class LocationForeground : Service() {
     private class ZmqHandler(private val address: String) {
         private var context: ZContext = ZContext()
         private var socket: ZMQ.Socket = context.createSocket(ZMQ.REQ)
-
-        init {
-            connect()
-        }
-
+        init { connect() }
         private fun connect() {
             socket.receiveTimeOut = 3000
             socket.sendTimeOut = 3000
             socket.linger = 0
             socket.connect(address)
         }
-
         private fun reconnect() {
             try {
                 context.destroySocket(socket)
                 socket = context.createSocket(ZMQ.REQ)
                 connect()
-            } catch (e: Exception) {
-                Log.e("ZMQ", "Реконнект провален: ${e.message}")
-            }
+            } catch (e: Exception) { Log.e("ZMQ", "Реконнект...") }
         }
-
         fun sendData(data: String): String {
             return try {
-                if (!socket.send(data)) throw Exception("Не отправилось")
-                val response = socket.recvStr()
-                response ?: throw Exception("Не отвечает")
+                if (!socket.send(data)) throw Exception()
+                socket.recvStr() ?: "ERROR"
             } catch (e: Exception) {
                 reconnect()
                 "ERROR"
             }
         }
-
-        fun close() {
-            context.destroy()
-        }
+        fun close() { try { context.destroy() } catch (e: Exception) {} }
     }
 }
