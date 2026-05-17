@@ -13,6 +13,8 @@ import android.os.IBinder
 import android.provider.Settings
 import android.telephony.*
 import android.util.Log
+import androidx.annotation.RequiresApi
+import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import com.google.android.gms.location.*
@@ -30,6 +32,8 @@ class LocationForeground : Service() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val scheduler = Executors.newScheduledThreadPool(1)
     private lateinit var zmqHandler: ZmqHandler
+    private lateinit var telephonyManager: TelephonyManager
+    private var activeFlags = "1111"
 
     companion object {
         val REQUIRED_PERMISSIONS = mutableListOf(
@@ -70,9 +74,10 @@ class LocationForeground : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        zmqHandler = ZmqHandler("tcp://192.168.0.55:20077")
+        zmqHandler = ZmqHandler("tcp://37.194.49.70:20077")
+        telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
         scheduler.scheduleWithFixedDelay({
-            try { getCurrentLocation() } catch (e: Exception) { Log.e(LOG_TAG, "Ошибка: ${e.message}") }
+            try { getCurrentLocation() } catch (e: Exception) { Log.e(LOG_TAG, "Error: ${e.message}") }
         }, 0, UPDATE_INTERVAL, TimeUnit.MILLISECONDS)
     }
 
@@ -80,31 +85,69 @@ class LocationForeground : Service() {
         val chanId = "loc_chan"
         val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(NotificationChannel(chanId, "Трекер", NotificationManager.IMPORTANCE_LOW))
+            manager.createNotificationChannel(NotificationChannel(chanId, "Tracker", NotificationManager.IMPORTANCE_LOW))
         }
         return NotificationCompat.Builder(this, chanId)
             .setContentTitle("MY PROJECT")
-            .setContentText("Идет сбор данных (30с буфер)")
+            .setContentText("Collecting data...")
             .setSmallIcon(android.R.drawable.ic_menu_mylocation)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .build()
     }
 
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun getCurrentLocation() {
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return
         LocationServices.getFusedLocationProviderClient(this).lastLocation.addOnSuccessListener { location ->
             location?.let {
-                val data = "${it.latitude};${it.longitude};${getSignalStrength()};${System.currentTimeMillis() / 1000}"
-                processData(data)
+                val locPart = if (activeFlags.getOrElse(0) { '1' } == '1') {
+                    "${it.latitude};${it.longitude};${it.altitude};${System.currentTimeMillis() / 1000};${it.accuracy}"
+                } else "SKIP;SKIP;SKIP;SKIP;SKIP"
+
+                val cellPart = getCellData(telephonyManager)
+                processData("$locPart;$cellPart")
             }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    fun getCellData(telephonyManager: TelephonyManager): String {
+        val info = telephonyManager.allCellInfo?.find { it.isRegistered } ?: return "NONE" + ";0".repeat(14)
+        return when (info) {
+            is CellInfoLte -> {
+                if (activeFlags.getOrElse(1) { '1' } == '0') "LTE_OFF" + ";0".repeat(14)
+                else {
+                    val id = info.cellIdentity
+                    val sig = info.cellSignalStrength
+                    "LTE;${id.bands?.firstOrNull() ?: 0};${id.ci};${id.earfcn};${id.mccString};${id.mncString};${id.pci};${id.tac};" +
+                            "${sig.asuLevel};${sig.cqi};${sig.rsrp};${sig.rsrq};${sig.rssi};${sig.rssnr};${sig.timingAdvance}"
+                }
+            }
+            is CellInfoNr -> {
+                if (activeFlags.getOrElse(3) { '1' } == '0') "NR_OFF" + ";0".repeat(10)
+                else {
+                    val id = info.cellIdentity as CellIdentityNr
+                    val sig = info.cellSignalStrength as CellSignalStrengthNr
+                    "NR;${id.bands.firstOrNull() ?: 0};${id.nci};${id.pci};${id.nrarfcn};${id.tac};${id.mccString};${id.mncString};" +
+                            "${sig.ssRsrp};${sig.ssRsrq};${sig.ssSinr};0"
+                }
+            }
+            is CellInfoGsm -> {
+                if (activeFlags.getOrElse(2) { '1' } == '0') "GSM_OFF" + ";0".repeat(9)
+                else {
+                    val id = info.cellIdentity
+                    val sig = info.cellSignalStrength
+                    "GSM;${id.cid};${id.bsic};${id.arfcn};${id.lac};${id.mccString};${id.mncString};${id.psc};" +
+                            "${sig.dbm};${sig.rssi};${sig.timingAdvance}"
+                }
+            }
+            else -> "UNKNOWN" + ";0".repeat(14)
         }
     }
 
     private fun processData(newData: String) {
         synchronized(ramBuffer) { ramBuffer.add(newData) }
-
-        // Ждем 6 записей (6 * 5с = 30 секунд)
         if (ramBuffer.size < 6) return
 
         scope.launch {
@@ -118,56 +161,38 @@ class LocationForeground : Service() {
             if (!docDir.exists()) docDir.mkdirs()
             val file = File(docDir, "location.txt")
 
-            // Читаем кеш БЕЗОПАСНО
             val diskData = try {
                 if (file.exists()) file.readLines() else emptyList()
-            } catch (e: Exception) {
-                Log.e(LOG_TAG, "Ошибка доступа к файлу: ${e.message}")
-                emptyList()
-            }
+            } catch (e: Exception) { emptyList() }
 
             val totalPayload = diskData + currentRam
             if (file.exists()) file.delete()
-
-            Log.d(LOG_TAG, "30с прошло. Пытаюсь отправить ${totalPayload.size} строк...")
 
             val unsent = mutableListOf<String>()
             var isError = false
 
             for (line in totalPayload) {
-                if (!isError && zmqHandler.sendData(line) == "ACK") {
-                    Log.d(LOG_TAG, "Успешно отправлено: $line")
+                if (!isError) {
+                    val response = zmqHandler.sendData(line)
+                    if (response != "ERROR") {
+                        if (response.length >= 4 && response.all { it == '0' || it == '1' }) {
+                            activeFlags = response
+                        }
+                    } else {
+                        isError = true
+                        unsent.add(line)
+                    }
                 } else {
-                    isError = true
                     unsent.add(line)
                 }
             }
 
             if (unsent.isNotEmpty()) {
                 try {
-                    Log.w(LOG_TAG, "Кэширую ${unsent.size} строк в Documents/location.txt")
                     file.appendText(unsent.joinToString("\n") + "\n")
-                } catch (e: Exception) {
-                    Log.e(LOG_TAG, "КРИТИЧЕСКАЯ ОШИБКА: Не удалось записать файл! Проверь разрешения в настройках.")
-                }
-            } else {
-                Log.d(LOG_TAG, "Все данные успешно ушли")
+                } catch (e: Exception) { }
             }
         }
-    }
-
-    private fun getSignalStrength(): Int {
-        val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-        return try {
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return -1
-            val info = tm.allCellInfo?.firstOrNull()
-            when (info) {
-                is CellInfoLte -> info.cellSignalStrength.dbm
-                is CellInfoGsm -> info.cellSignalStrength.dbm
-                is CellInfoWcdma -> info.cellSignalStrength.dbm
-                else -> -1
-            }
-        } catch (e: Exception) { -1 }
     }
 
     override fun onDestroy() {
@@ -182,8 +207,8 @@ class LocationForeground : Service() {
         private var socket: ZMQ.Socket = context.createSocket(ZMQ.REQ)
         init { connect() }
         private fun connect() {
-            socket.receiveTimeOut = 3000
-            socket.sendTimeOut = 3000
+            socket.receiveTimeOut = 2000
+            socket.sendTimeOut = 2000
             socket.linger = 0
             socket.connect(address)
         }
@@ -192,7 +217,7 @@ class LocationForeground : Service() {
                 context.destroySocket(socket)
                 socket = context.createSocket(ZMQ.REQ)
                 connect()
-            } catch (e: Exception) { Log.e("ZMQ", "Реконнект...") }
+            } catch (e: Exception) { }
         }
         fun sendData(data: String): String {
             return try {
